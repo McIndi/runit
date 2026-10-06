@@ -126,7 +126,7 @@ The `Exit Code:` line of the report shows the same value that runit exits with. 
 
 If runit cannot write the `--out-file` file, it logs one error line. If the command failed, runit exits with the exit code of the command; if the command exited with 0, runit exits with 1. If runit cannot write the report to stdout (for example, a full disk), it logs one error line and exits with the exit code of the command. If the reader of stdout goes away (for example, `runit yes | head`), runit stops quietly. The `--out-file` file is written before the report goes to the terminal.
 
-Releases up to 0.1.4 always exited with 0. If a script relies on that, use `runit ... || true`.
+This behavior is new in 0.2.0. Releases up to 0.1.4 always exited with 0. If a script relies on that, use `runit ... || true`.
 
 ## Development & Extending
 
