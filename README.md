@@ -124,7 +124,7 @@ runit exits with the exit code of the command, so you can use it in scripts and 
 
 The `Exit Code:` line of the report shows the same value that runit exits with. For a signal, it also shows the signal, for example `Exit Code: 143 (signal 15, SIGTERM)`.
 
-If runit cannot write the `--out-file` file, or cannot write the report to stdout (for example, a full disk), it logs one error line and still exits with the exit code of the command. If the reader of stdout goes away (for example, `runit yes | head`), runit stops quietly. The `--out-file` file is written before the report goes to the terminal.
+If runit cannot write the `--out-file` file, it logs one error line. If the command failed, runit exits with the exit code of the command; if the command exited with 0, runit exits with 1. If runit cannot write the report to stdout (for example, a full disk), it logs one error line and exits with the exit code of the command. If the reader of stdout goes away (for example, `runit yes | head`), runit stops quietly. The `--out-file` file is written before the report goes to the terminal.
 
 Releases up to 0.1.4 always exited with 0. If a script relies on that, use `runit ... || true`.
 

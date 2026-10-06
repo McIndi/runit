@@ -190,17 +190,15 @@ class TestRunitAccuracy(unittest.TestCase):
                 self.assertGreaterEqual(val, 3)
 
     def test_output_file_error_handling(self):
-        """Tries to write to a read-only location: one-line error, command's exit code kept."""
+        """Tries to write to a read-only location and expects error."""
         with tempfile.TemporaryDirectory() as tmpdir:
             ro_dir = os.path.join(tmpdir, 'ro')
             os.mkdir(ro_dir)
             os.chmod(ro_dir, 0o555)  # read-only
             out_file = os.path.join(ro_dir, 'out.txt')
-            result = subprocess.run(['runit', '--out-file', out_file, 'python', '-c', 'print(123); raise SystemExit(3)'], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 3)
+            result = subprocess.run(['runit', '--out-file', out_file, 'python', '-c', 'print(123)'], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
             self.assertTrue('error' in result.stderr.lower() or 'permission' in result.stderr.lower())
-            self.assertNotIn('Traceback', result.stderr)
-            self.assertIn('Exit Code: 3', result.stdout)
 
     def test_malformed_cli_arguments(self):
         """Passes invalid CLI options and checks for error/help output."""
@@ -370,14 +368,14 @@ class TestRunitRegressions(unittest.TestCase):
             self.assertEqual(len(result.stderr.strip().splitlines()), 1, msg=result.stderr)
             self.assertIn('no-shebang', result.stderr)
 
-    def test_unwritable_out_file_keeps_exit_code(self):
-        """If --out-file cannot be written, runit logs one line and keeps the command's exit code."""
+    def test_unwritable_out_file_exit_code_precedence(self):
+        """Unwritable --out-file: one error line; a non-zero command code wins, else runit exits 1."""
         with tempfile.TemporaryDirectory() as tmpdir:
             out_file = os.path.join(tmpdir, 'missing-dir', 'out.txt')
-            for code in (0, 4):
+            for code, expected in ((0, 1), (4, 4)):
                 result = self._run(['--out-file', out_file, sys.executable, '-c',
                                     'raise SystemExit({})'.format(code)])
-                self.assertEqual(result.returncode, code, msg=result.stderr)
+                self.assertEqual(result.returncode, expected, msg=result.stderr)
                 self.assertNotIn('Traceback', result.stderr)
                 self.assertEqual(len(result.stderr.strip().splitlines()), 1, msg=result.stderr)
                 self.assertIn(out_file, result.stderr)

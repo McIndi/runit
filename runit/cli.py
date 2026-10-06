@@ -76,8 +76,11 @@ def run_cli():
                 f.write(file_output)
             log.info("Wrote output to file: %s", args.out_file)
         except OSError as e:
-            # Keep the command's exit status; report the problem in one line.
+            # runit's own job failed: report it in one line. A non-zero
+            # exit code of the command wins; otherwise runit exits 1.
             log.error("Cannot write --out-file %s: %s", args.out_file, e)
+            if status == 0:
+                status = 1
     _write_stdout(output, log)
     log.info("runit CLI finished.")
     return status
