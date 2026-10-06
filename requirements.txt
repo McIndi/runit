@@ -1,2 +1,2 @@
 psutil
-plotext
+plotext>=5.3,<6

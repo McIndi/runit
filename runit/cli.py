@@ -6,7 +6,21 @@ from .utils import strip_ansi
 from .logging_config import setup_logging
 import argparse
 import logging
+from contextlib import redirect_stdout
 from io import StringIO
+
+
+def exit_status(returncode):
+    """Map a subprocess return code to the exit status runit should use.
+
+    A program killed by signal N has a negative return code; shells report
+    that as 128 + N, so runit does the same.
+    """
+    if returncode is None:
+        return 1
+    if returncode < 0:
+        return 128 - returncode
+    return returncode
 
 
 def run_cli():
@@ -18,22 +32,27 @@ def run_cli():
     if not args.command:
         parser.print_help()
         log.info("No command provided. Exiting.")
-        return
-    orig_stdout = sys.stdout
-    buf = None
-    if args.out_file:
-        buf = StringIO()
-        sys.stdout = buf
-        log.info("Capturing output to buffer for file: %s", args.out_file)
-    stats = monitor_process(args.command)
+        return 0
+    try:
+        # The program's stdout and stderr go to the terminal as it runs.
+        stats = monitor_process(args.command)
+    except FileNotFoundError as e:
+        log.error("Command not found: %s (%s)", args.command[0], e)
+        return 127
+    except PermissionError as e:
+        log.error("Command cannot be executed: %s (%s)", args.command[0], e)
+        return 126
     report = format_report(stats)
-    if args.plot:
-        plot_charts(stats, args.plot_width, args.plot_height)
-    print(report)
     if args.out_file:
-        sys.stdout = orig_stdout
+        # Capture the report and charts, then show them and write the file.
+        buf = StringIO()
+        with redirect_stdout(buf):
+            if args.plot:
+                plot_charts(stats, args.plot_width, args.plot_height)
+            print(report)
         output = buf.getvalue()
-        print(output, end='')
+        sys.stdout.write(output)
+        sys.stdout.flush()
         file_output = output
         if getattr(args, 'strip_ansi', False):
             log.info("Stripping ANSI codes for output file.")
@@ -41,7 +60,12 @@ def run_cli():
         with open(args.out_file, 'w', encoding='utf-8') as f:
             f.write(file_output)
         log.info("Wrote output to file: %s", args.out_file)
+    else:
+        if args.plot:
+            plot_charts(stats, args.plot_width, args.plot_height)
+        print(report)
     log.info("runit CLI finished.")
+    return exit_status(stats.get('returncode'))
 
 def create_parser():
     parser = argparse.ArgumentParser(
@@ -57,7 +81,8 @@ def create_parser():
         '--out-file',
         type=str,
         default=None,
-        help='Write the text report to this file instead of stdout.'
+        help='Also write the report (and charts) to this file. '
+             'The program output and the report are still shown in the terminal.'
     )
     parser.add_argument(
         '--strip-ansi',

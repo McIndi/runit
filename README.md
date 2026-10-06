@@ -26,7 +26,7 @@ See `runit` in action:
 ## Requirements
 * Python 3.9+
 * psutil
-* plotext
+* plotext 5.x (`plotext>=5.3,<6`). plotext 6 replaced the plotting API that runit uses, so it is not supported yet.
 
 ## Installation
 
@@ -78,6 +78,7 @@ PID: 12345
 Start Time: 2025-07-31 12:00:00.000000
 End Time: 2025-07-31 12:00:01.000000
 Duration: 0:00:01
+Exit Code: 0
 Max RSS (bytes): 12345678
 Max Threads: 4
 Max Children: 0
@@ -97,18 +98,29 @@ runit python benchmark.py
 ## CLI Options
 
 - `--log-level LEVEL`: Set the logging level (default: INFO)
-- `--out-file FILE`: Write the report and charts to a file (output is also shown in the terminal)
+- `--out-file FILE`: Also write the report and charts to a file (they are still shown in the terminal)
 - `--strip-ansi`: Remove ANSI escape codes from output file (for plain text files)
 - `--plot`: If specified, attempt to plot CPU and memory usage
+- `--plot-width N`, `--plot-height N`: Set the chart size (default: 80 x 20)
 - `command`: The command to run and monitor
 
-When using `--out-file`, the output is both displayed in the terminal and written to the file. For plain text (no colors or terminal formatting), simply add `--strip-ansi`.
+The output of the command goes to the terminal while it runs (stdout to stdout, stderr to stderr), with or without `--out-file`. When the command ends, runit shows the report, which also contains the captured stdout and stderr.
+
+When using `--out-file`, the report and charts are both displayed in the terminal and written to the file. For plain text (no colors or terminal formatting), simply add `--strip-ansi`.
 
 ```sh
 runit --out-file out.txt --strip-ansi python benchmark.py
 ```
 
 You'll see the report and charts in your terminal, and a plain text version in `out.txt`.
+
+## Exit Status
+
+runit exits with the exit code of the command, so you can use it in scripts and CI:
+
+- The exit code of the command (for example, `runit false` exits with 1).
+- 128 + N when the command is stopped by signal N (for example, 143 for SIGTERM).
+- 127 when the command is not found, and 126 when it cannot be executed.
 
 ## Development & Extending
 
