@@ -2,25 +2,39 @@ import sys
 from .monitor import monitor_process
 from .report import format_report
 from .plotting import plot_charts
-from .utils import strip_ansi
+from .utils import strip_ansi, exit_status
 from .logging_config import setup_logging
 import argparse
 import logging
+import os
 from contextlib import redirect_stdout
 from io import StringIO
 
 
-def exit_status(returncode):
-    """Map a subprocess return code to the exit status runit should use.
+def _write_stdout(text, log):
+    """Write the report to stdout. Return False if stdout is closed or broken.
 
-    A program killed by signal N has a negative return code; shells report
-    that as 128 + N, so runit does the same.
+    When the reader has gone away (for example `runit cmd | head`), stay quiet
+    like other command line tools. For other errors (for example a full disk),
+    log one line. In both cases stdout is pointed at os.devnull, so that the
+    flush at interpreter exit does not raise again.
     """
-    if returncode is None:
-        return 1
-    if returncode < 0:
-        return 128 - returncode
-    return returncode
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return True
+    except (OSError, ValueError) as e:
+        if isinstance(e, BrokenPipeError):
+            log.info("Output reader closed the pipe; report not shown.")
+        else:
+            log.error("Cannot write the report to stdout: %s", e)
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except (OSError, ValueError):
+            pass
+        return False
 
 
 def run_cli():
@@ -39,33 +53,34 @@ def run_cli():
     except FileNotFoundError as e:
         log.error("Command not found: %s (%s)", args.command[0], e)
         return 127
-    except PermissionError as e:
+    except OSError as e:
+        # For example EACCES, or ENOEXEC for a script without a shebang.
         log.error("Command cannot be executed: %s (%s)", args.command[0], e)
         return 126
+    status = exit_status(stats.get('returncode'))
     report = format_report(stats)
+    # Capture the report and charts, write --out-file first, then the terminal.
+    buf = StringIO()
+    with redirect_stdout(buf):
+        if args.plot:
+            plot_charts(stats, args.plot_width, args.plot_height)
+        print(report)
+    output = buf.getvalue()
     if args.out_file:
-        # Capture the report and charts, then show them and write the file.
-        buf = StringIO()
-        with redirect_stdout(buf):
-            if args.plot:
-                plot_charts(stats, args.plot_width, args.plot_height)
-            print(report)
-        output = buf.getvalue()
-        sys.stdout.write(output)
-        sys.stdout.flush()
         file_output = output
         if getattr(args, 'strip_ansi', False):
             log.info("Stripping ANSI codes for output file.")
             file_output = strip_ansi(output)
-        with open(args.out_file, 'w', encoding='utf-8') as f:
-            f.write(file_output)
-        log.info("Wrote output to file: %s", args.out_file)
-    else:
-        if args.plot:
-            plot_charts(stats, args.plot_width, args.plot_height)
-        print(report)
+        try:
+            with open(args.out_file, 'w', encoding='utf-8') as f:
+                f.write(file_output)
+            log.info("Wrote output to file: %s", args.out_file)
+        except OSError as e:
+            # Keep the command's exit status; report the problem in one line.
+            log.error("Cannot write --out-file %s: %s", args.out_file, e)
+    _write_stdout(output, log)
     log.info("runit CLI finished.")
-    return exit_status(stats.get('returncode'))
+    return status
 
 def create_parser():
     parser = argparse.ArgumentParser(

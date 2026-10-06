@@ -80,10 +80,15 @@ def monitor_process(command):
                     continue
                 try:
                     write(chunk)
-                except (OSError, ValueError):
-                    # The destination is closed (for example EPIPE). Close
-                    # the pipe so the program sees the same closed pipe.
-                    raise
+                except (OSError, ValueError) as e:
+                    # The destination is closed or full (for example EPIPE
+                    # from `runit cmd | head`). Stop and close the pipe so
+                    # the program sees a closed pipe, as without runit.
+                    if isinstance(e, BrokenPipeError):
+                        log.info("Output reader closed the pipe; stopped forwarding.")
+                    else:
+                        log.warning("Stream forwarding stopped due to write error: %s", e)
+                    break
                 except Exception as e:
                     # Any other failure must not stop the reader: a program
                     # that cannot write blocks on a full pipe or is killed by
@@ -91,7 +96,7 @@ def monitor_process(command):
                     log.warning("Stream forwarding stopped due to write error: %s", e)
                     write = None
         except (OSError, ValueError) as e:
-            log.warning("Stream forwarding stopped due to I/O error: %s", e)
+            log.warning("Stream forwarding stopped due to read error: %s", e)
         finally:
             _safe_close(stream)
 

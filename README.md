@@ -120,7 +120,13 @@ runit exits with the exit code of the command, so you can use it in scripts and 
 
 - The exit code of the command (for example, `runit false` exits with 1).
 - 128 + N when the command is stopped by signal N (for example, 143 for SIGTERM).
-- 127 when the command is not found, and 126 when it cannot be executed.
+- 127 when the command is not found, and 126 when it cannot be executed (for example, no permission, or a script without a `#!` line).
+
+The `Exit Code:` line of the report shows the same value that runit exits with. For a signal, it also shows the signal, for example `Exit Code: 143 (signal 15, SIGTERM)`.
+
+If runit cannot write the `--out-file` file, or cannot write the report to stdout (for example, a full disk), it logs one error line and still exits with the exit code of the command. If the reader of stdout goes away (for example, `runit yes | head`), runit stops quietly. The `--out-file` file is written before the report goes to the terminal.
+
+Releases up to 0.1.4 always exited with 0. If a script relies on that, use `runit ... || true`.
 
 ## Development & Extending
 
