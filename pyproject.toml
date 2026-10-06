@@ -12,7 +12,7 @@ authors = [{ name = "NotesOfCliff", email = "notesofcliff@gmail.com" }]
 license = "GPL-3.0-only"
 dependencies = [
   "psutil",
-  "plotext",
+  "plotext>=5.3,<6",
 ]
 
 [tool.setuptools_scm]

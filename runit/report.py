@@ -1,4 +1,4 @@
-from .utils import extract_memory_rss, extract_num_threads, extract_num_children
+from .utils import extract_memory_rss, extract_num_threads, extract_num_children, describe_exit
 import logging
 
 log = logging.getLogger(__name__)
@@ -14,6 +14,7 @@ def format_report(stats):
         "Start Time: {}".format(stats['start_time']),
         "End Time: {}".format(stats['end_time']),
         "Duration: {}".format(stats['duration']),
+        "Exit Code: {}".format(describe_exit(stats.get('returncode'))),
         "Max RSS (bytes): {}".format(max(rss_values) if rss_values else 'N/A'),
         "Max Threads: {}".format(max(num_threads) if num_threads else 'N/A'),
         "Max Children: {}".format(max(num_children) if num_children else 'N/A'),

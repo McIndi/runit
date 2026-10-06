@@ -10,6 +10,24 @@ log = logging.getLogger(__name__)
 _STREAM_CHUNK_SIZE = 4096
 _THREAD_JOIN_TIMEOUT_SECONDS = 5
 
+def _binary_writer(target):
+    """Return a function that writes bytes to ``target`` and flushes it.
+
+    ``target`` is normally ``sys.stdout`` or ``sys.stderr``. A text stream
+    without a binary ``buffer`` (for example ``io.StringIO``) gets the bytes
+    decoded, so that forwarding never fails because of the stream type.
+    """
+    buffer = getattr(target, 'buffer', None)
+    if buffer is not None:
+        def write(chunk):
+            buffer.write(chunk)
+            buffer.flush()
+    else:
+        def write(chunk):
+            target.write(chunk.decode(errors='backslashreplace'))
+            target.flush()
+    return write
+
 def _start_proc(command: list):
     log.info("Starting process: %s", command)
     proc = subprocess.Popen(
@@ -29,6 +47,9 @@ def monitor_process(command):
         'memory_info': [],
         'children': [],
         'threads': [],
+        'stdout': '',
+        'stderr': '',
+        'returncode': None,
     }
     proc = _start_proc(command)
     ps_proc = psutil.Process(proc.pid)
@@ -48,14 +69,32 @@ def monitor_process(command):
         if reader is None:
             # Fallback for file-like streams that do not implement read1().
             reader = stream.read
+        write = _binary_writer(target)
         try:
             while True:
                 chunk = reader(_STREAM_CHUNK_SIZE)
                 if not chunk:
                     break
                 chunks.append(chunk)
-                target.buffer.write(chunk)
-                target.flush()
+                if write is None:
+                    continue
+                try:
+                    write(chunk)
+                except (OSError, ValueError) as e:
+                    # The destination is closed or full (for example EPIPE
+                    # from `runit cmd | head`). Stop and close the pipe so
+                    # the program sees a closed pipe, as without runit.
+                    if isinstance(e, BrokenPipeError):
+                        log.info("Output reader closed the pipe; stopped forwarding.")
+                    else:
+                        log.warning("Stream forwarding stopped due to write error: %s", e)
+                    break
+                except Exception as e:
+                    # Any other failure must not stop the reader: a program
+                    # that cannot write blocks on a full pipe or is killed by
+                    # a closed one. Keep capturing and stop forwarding.
+                    log.warning("Stream forwarding stopped due to write error: %s", e)
+                    write = None
         except (OSError, ValueError) as e:
             log.warning("Stream forwarding stopped due to read error: %s", e)
         finally:
@@ -92,7 +131,7 @@ def monitor_process(command):
                 log.warning("Process ended or became inaccessible during monitoring.")
                 break
             time.sleep(0.1)
-        proc.wait()
+        stats['returncode'] = proc.wait()
         stdout_thread.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
         stderr_thread.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
         if stdout_thread.is_alive() or stderr_thread.is_alive():
@@ -107,6 +146,8 @@ def monitor_process(command):
 
     except Exception as e:
         log.warning("Exception during stat collection: %s", e)
+    if stats['returncode'] is None:
+        stats['returncode'] = proc.wait()
     stats['end_time'] = datetime.now()
     stats['duration'] = stats['end_time'] - stats['start_time']
     log.info("Process monitoring complete. Duration: %s", stats['duration'])
