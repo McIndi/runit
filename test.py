@@ -3,6 +3,8 @@ import unittest
 import tempfile
 import os
 import re
+import signal
+import sys
 import time
 
 class TestRunitCLI(unittest.TestCase):
@@ -225,6 +227,220 @@ class TestRunitAccuracy(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         # Look for plotext chart markers (e.g., 'CPU Usage', 'Memory Usage')
         self.assertTrue(r'CPU % over time' in result.stdout or 'RSS (MB) over time' in result.stdout or 'plotext' in result.stdout)
+
+
+class TestRunitRegressions(unittest.TestCase):
+    """Regression tests that run the installed ``runit`` entrypoint."""
+
+    # Generous limit so that a hang fails the test instead of blocking CI.
+    TIMEOUT_SECONDS = 60
+    # Well above the ~64 KB pipe buffer that made 0.1.4 hang.
+    LARGE_OUTPUT_BYTES = 1024 * 1024
+
+    def _run(self, args, timeout=None, text=True):
+        return subprocess.run(
+            ['runit', '--log-level', 'WARNING'] + args,
+            capture_output=True,
+            text=text,
+            timeout=timeout or self.TIMEOUT_SECONDS,
+        )
+
+    def _large_output_code(self, stream):
+        return (
+            'import sys\n'
+            'for i in range({n}):\n'
+            '    sys.{stream}.write("line %07d\\n" % i)\n'
+        ).format(n=self.LARGE_OUTPUT_BYTES // 13, stream=stream)
+
+    def _expected_large_output(self):
+        return ''.join('line %07d\n' % i for i in range(self.LARGE_OUTPUT_BYTES // 13))
+
+    def test_out_file_keeps_streaming_after_first_chunk(self):
+        """--out-file must not crash the forwarder or kill the program."""
+        code = (
+            'import time\n'
+            'print("first", flush=True)\n'
+            'time.sleep(0.5)\n'
+            'for i in range(3):\n'
+            '    print("later-%d" % i, flush=True)\n'
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, 'out.txt')
+            result = self._run(['--out-file', out_file, sys.executable, '-c', code])
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertNotIn('BrokenPipeError', result.stderr)
+            self.assertTrue(
+                result.stdout.startswith('first\nlater-0\nlater-1\nlater-2\n'),
+                msg=result.stdout[:500],
+            )
+            with open(out_file, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            self.assertIn('Command:', file_content)
+            for line in ('first', 'later-0', 'later-1', 'later-2'):
+                self.assertIn(line, file_content)
+            self.assertNotIn('BrokenPipeError', file_content)
+
+    def test_out_file_with_large_output(self):
+        """--out-file with more than a pipe buffer of output completes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, 'out.txt')
+            result = self._run(['--out-file', out_file, sys.executable, '-c',
+                                self._large_output_code('stdout')])
+            self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+            expected = self._expected_large_output()
+            self.assertTrue(result.stdout.startswith(expected))
+            with open(out_file, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            self.assertIn('Command:', file_content)
+            last_line = expected.splitlines()[-1]
+            self.assertIn(last_line, file_content)
+
+    def test_out_file_with_plot_and_strip_ansi(self):
+        """Charts are written to --out-file and ANSI codes are removed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, 'out.txt')
+            result = self._run(['--out-file', out_file, '--strip-ansi', '--plot',
+                                sys.executable, '-c', 'import time; time.sleep(1)'])
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            with open(out_file, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            self.assertIn('CPU % over time', file_content)
+            self.assertIn('Command:', file_content)
+            self.assertIsNone(re.search(r'\x1B\[[0-?]*[ -/]*[@-~]', file_content))
+
+    def test_large_stdout_does_not_hang(self):
+        """More than 64 KB of stdout is forwarded in full without hanging."""
+        result = self._run([sys.executable, '-c', self._large_output_code('stdout')])
+        self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+        self.assertTrue(result.stdout.startswith(self._expected_large_output()))
+        self.assertIn('Command:', result.stdout)
+
+    def test_large_stderr_does_not_hang(self):
+        """More than 64 KB of stderr is forwarded in full without hanging."""
+        result = self._run([sys.executable, '-c', self._large_output_code('stderr')])
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.startswith(self._expected_large_output()))
+        self.assertIn('Command:', result.stdout)
+
+    def test_exit_code_is_propagated(self):
+        """runit exits with the exit code of the program it ran."""
+        result = self._run([sys.executable, '-c', 'import sys; sys.exit(3)'])
+        self.assertEqual(result.returncode, 3, msg=result.stderr)
+        self.assertIn('Exit Code: 3', result.stdout)
+
+    @unittest.skipIf(os.name != 'posix', 'POSIX signals only')
+    def test_signal_exit_code_is_propagated(self):
+        """A program killed by a signal gives the shell-style 128+N exit code."""
+        code = 'import os, signal; os.kill(os.getpid(), signal.SIGTERM)'
+        result = self._run([sys.executable, '-c', code])
+        self.assertEqual(result.returncode, 128 + signal.SIGTERM, msg=result.stderr)
+        # The report shows the same value that runit exits with.
+        self.assertIn('Exit Code: 143 (signal 15, SIGTERM)', result.stdout)
+
+    def test_binary_output_is_preserved(self):
+        """Non-UTF-8 output is forwarded byte for byte and does not crash the report."""
+        payload = bytes(range(256))
+        code = 'import sys; sys.stdout.buffer.write(bytes(range(256)))'
+        result = self._run([sys.executable, '-c', code], text=False)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertTrue(result.stdout.startswith(payload))
+        self.assertIn(b'Command:', result.stdout)
+        self.assertNotIn(b'Traceback', result.stderr)
+
+    def test_missing_command_exit_code(self):
+        """A command that does not exist gives exit code 127 and no traceback."""
+        result = self._run(['nonexistent_command_12345'])
+        self.assertEqual(result.returncode, 127)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertIn('nonexistent_command_12345', result.stderr)
+
+    def test_exec_format_error_exit_code(self):
+        """A file that cannot be exec'd (no shebang: ENOEXEC) gives 126 and no traceback."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = os.path.join(tmpdir, 'no-shebang')
+            with open(script, 'w') as f:
+                f.write('echo hi\n')
+            os.chmod(script, 0o755)
+            result = self._run([script])
+            self.assertEqual(result.returncode, 126, msg=result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual(len(result.stderr.strip().splitlines()), 1, msg=result.stderr)
+            self.assertIn('no-shebang', result.stderr)
+
+    def test_unwritable_out_file_exit_code_precedence(self):
+        """Unwritable --out-file: one error line; a non-zero command code wins, else runit exits 1."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, 'missing-dir', 'out.txt')
+            for code, expected in ((0, 1), (4, 4)):
+                result = self._run(['--out-file', out_file, sys.executable, '-c',
+                                    'raise SystemExit({})'.format(code)])
+                self.assertEqual(result.returncode, expected, msg=result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertEqual(len(result.stderr.strip().splitlines()), 1, msg=result.stderr)
+                self.assertIn(out_file, result.stderr)
+                self.assertIn('Exit Code: {}'.format(code), result.stdout)
+
+    @unittest.skipIf(os.name != 'posix', 'POSIX pipes and the yes command')
+    def test_closed_stdout_during_run_is_quiet(self):
+        """`runit yes | head -1` ends quietly with the shell status of yes (141)."""
+        proc = subprocess.Popen(['runit', '--log-level', 'WARNING', 'yes'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertEqual(proc.stdout.readline(), b'y\n')
+            proc.stdout.close()  # like `head -1` exiting
+            stderr = proc.communicate(timeout=self.TIMEOUT_SECONDS)[1].decode()
+            self.assertEqual(proc.returncode, 128 + signal.SIGPIPE, msg=stderr)
+            self.assertEqual(stderr, '')
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+    @unittest.skipIf(os.name != 'posix', 'POSIX pipes')
+    def test_closed_stdout_before_report_still_writes_out_file(self):
+        """If stdout closes before the report, --out-file is still written and runit is quiet."""
+        code = 'import time; print("one", flush=True); time.sleep(1)'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, 'out.txt')
+            proc = subprocess.Popen(['runit', '--log-level', 'WARNING', '--out-file', out_file,
+                                     sys.executable, '-c', code],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.assertEqual(proc.stdout.readline(), b'one\n')
+                proc.stdout.close()  # the reader goes away before the report
+                stderr = proc.communicate(timeout=self.TIMEOUT_SECONDS)[1].decode()
+                self.assertEqual(proc.returncode, 0, msg=stderr)
+                self.assertEqual(stderr, '')
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+            with open(out_file, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            self.assertIn('Exit Code: 0', file_content)
+            self.assertIn('one', file_content)
+
+    @unittest.skipUnless(os.path.exists('/dev/full'), 'needs /dev/full')
+    def test_full_stdout_gives_one_line_error(self):
+        """A report that cannot be written (ENOSPC) gives one error line and the command's exit code."""
+        with open('/dev/full', 'w') as full:
+            result = subprocess.run(['runit', '--log-level', 'WARNING', sys.executable, '-c',
+                                     'raise SystemExit(5)'],
+                                    stdout=full, stderr=subprocess.PIPE, text=True,
+                                    timeout=self.TIMEOUT_SECONDS)
+        self.assertEqual(result.returncode, 5, msg=result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1, msg=result.stderr)
+
+    def test_plot_has_no_plotting_error(self):
+        """--plot draws charts with the supported plotext API."""
+        result = self._run(['--plot', sys.executable, '-c', 'import time; time.sleep(1)'])
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertNotIn('Could not plot chart', result.stderr)
+        self.assertIn('CPU % over time', result.stdout)
+
+
 
 if __name__ == '__main__':
     unittest.main()
