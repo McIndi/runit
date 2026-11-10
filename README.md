@@ -33,7 +33,7 @@ See `runit` in action:
 Clone this repository and install with pip:
 
 ```sh
-git clone https://github.com/notesofcliff/runit.git
+git clone https://github.com/McIndi/runit.git
 cd runit
 python -m venv .venv
 source .venv/bin/activate  # Or (for Windows) .venv/Scripts/activate
@@ -46,7 +46,7 @@ python test.py
 Or, install directly from GitHub:
 
 ```sh
-pip install git+https://github.com/notesofcliff/runit.git
+pip install git+https://github.com/McIndi/runit.git
 ```
 
 After installation, use `runit` to run and analyze any command:
