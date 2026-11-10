@@ -15,6 +15,11 @@ dependencies = [
   "plotext>=5.3,<6",
 ]
 
+[project.urls]
+Homepage = "https://github.com/McIndi/runit"
+Repository = "https://github.com/McIndi/runit"
+Issues = "https://github.com/McIndi/runit/issues"
+
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
 local_scheme = "no-local-version"
